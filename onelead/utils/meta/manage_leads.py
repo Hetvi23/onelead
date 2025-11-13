@@ -5,7 +5,7 @@ from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.lead import Lead
 # from .. import formatting_functions
 from ..formatting_functions import FORMATTING_FUNCTIONS
-from ..meta_lead import get_lead_config
+from ..meta_lead import get_lead_config, _normalize_platform_label
 # from your_meta_sdk_module import MetaAdsAPI 
 
 
@@ -238,14 +238,18 @@ def process_logged_lead(doc, method):
         # Use Meta SDK to fetch lead data
         lead_data = fetch_lead_from_meta(doc.leadgen_id, meta_config)
         if lead_data:
+          platform_label = _normalize_platform_label(lead_data.get("platform"))
           # Log the data first
           doc.db_set({
               "lead_payload": json.dumps(lead_data),
               "organic": lead_data.get("is_organic", False),
-              "platform": 'Instagram' if lead_data.get("platform") == 'ig' else 'Facebook' if lead_data.get("platform") == 'fb' else '',
+              "platform": platform_label or doc.platform or '',
           })
       else:
         lead_data = json.loads(doc.lead_payload)
+        platform_label = _normalize_platform_label(lead_data.get("platform"))
+        if platform_label and doc.platform != platform_label:
+          doc.db_set("platform", platform_label)
 
       
       # Retrieve the form configuration for the given form_id
@@ -437,6 +441,9 @@ def create_lead_entry(lead_data, form_doc, log_doc, user="Administrator"):
 
             new_lead.set(lead_field, field_value)
 
+        # Ensure Meta source/subsource defaults are applied
+        _apply_meta_source_fields(new_lead, log_doc, lead_data)
+
         # Insert the new lead and commit to database
         frappe.set_user(user)
         res = new_lead.insert(ignore_permissions=True)
@@ -468,6 +475,31 @@ def parse_function_parameters(param_string):
 
     # Fallback: Comma-Separated String
     return [param.strip() for param in param_string.split(',') if param.strip()]
+
+
+def _apply_meta_source_fields(lead_doc, log_doc, lead_payload):
+    """Force source to Meta and derive subsource from platform when available."""
+    try:
+        source_name = "Meta"
+        if frappe.db.exists("Source", source_name):
+            lead_doc.source = source_name
+        else:
+            frappe.logger().warning(
+                "Source 'Meta' not found while processing Meta webhook lead; skipping source assignment."
+            )
+
+        platform_label = None
+        if isinstance(lead_payload, dict):
+            platform_label = _normalize_platform_label(lead_payload.get("platform"))
+        if not platform_label:
+            platform_label = _normalize_platform_label(getattr(log_doc, "platform", None))
+
+        if platform_label in {"Facebook", "Instagram"}:
+            lead_doc.subsource = platform_label
+    except Exception as exc:
+        frappe.logger().warning(
+            f"Failed to enforce Meta source/subsource while creating lead: {exc}"
+        )
 
 
 # Example setup for calling the function dynamically

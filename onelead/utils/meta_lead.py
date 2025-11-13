@@ -9,6 +9,18 @@ import hashlib
 import hmac
 from frappe.utils.password import get_decrypted_password
 
+
+def _normalize_platform_label(platform_value):
+    """Return a normalized human readable platform label."""
+    if not platform_value:
+        return None
+    normalized = str(platform_value).strip().lower()
+    if normalized in {"fb", "facebook"}:
+        return "Facebook"
+    if normalized in {"ig", "instagram"}:
+        return "Instagram"
+    return None
+
 @frappe.whitelist(allow_guest=True)
 def webhook():
     """ Meta Ads Webhook Entry Point """
@@ -95,6 +107,7 @@ def create_lead_log(data, lead_data, global_conf):
     form_id = lead_data.get("form_id")
     ad_id = lead_data.get("ad_id")
     created_time = lead_data.get("created_time")
+    platform_label = _normalize_platform_label(lead_data.get("platform"))
 
     lead_log = frappe.new_doc("Meta Webhook Lead Logs")
     lead_log.update({
@@ -105,10 +118,12 @@ def create_lead_log(data, lead_data, global_conf):
         "source": "Webhook",
         "ad_id": ad_id,
         "form_id": form_id,
-        "Source": 'Webhook',
+        "Source": "Meta",
         "created_time": convert_epoch_to_frappe_date(created_time),
         "processing_status": "Pending"
     })
+    if platform_label:
+        lead_log.platform = platform_label
 
     configured_form = frappe.db.exists("Meta Lead Form", {"form_id": form_id})
     config = get_lead_config(page_id, form_id, global_conf)
