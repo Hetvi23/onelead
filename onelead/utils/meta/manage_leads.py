@@ -441,6 +441,10 @@ def create_lead_entry(lead_data, form_doc, log_doc, user="Administrator"):
 
             new_lead.set(lead_field, field_value)
 
+        meta = frappe.get_meta(new_lead.doctype)
+        if getattr(log_doc, "form_id", None) and meta.has_field("form_id"):
+            new_lead.set("form_id", log_doc.form_id)
+
         # Ensure Meta source/subsource defaults are applied
         _apply_meta_source_fields(new_lead, log_doc, lead_data)
 
