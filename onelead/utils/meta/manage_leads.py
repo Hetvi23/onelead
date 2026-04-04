@@ -11,12 +11,17 @@ from ..meta_lead import get_lead_config, _normalize_platform_label
 
 # ================== Utility Functions ==================
 
-def ensure_campaign_exists(form_doc):
+def ensure_campaign_exists(form_doc, lead_data=None):
     """Ensure a campaign exists for the given Meta Lead Form."""
     try:
-        # Generate campaign ID based on form name and form ID
-        campaign_id = f"{form_doc.form_name.replace(' ', '_')}_{form_doc.form_id}"
-        campaign_name = form_doc.form_name or f"Campaign for {form_doc.form_id}"
+        if lead_data and lead_data.get("campaign_id"):
+            campaign_id = lead_data.get("campaign_id")
+            campaign_name = lead_data.get("campaign_name") or f"Campaign for {form_doc.form_id}"
+        else:
+            # Generate campaign ID based on form name and form ID
+            campaign_id = f"{form_doc.form_name.replace(' ', '_')}_{form_doc.form_id}"
+            campaign_name = form_doc.form_name or f"Campaign for {form_doc.form_id}"
+
         campaign_objective = "OUTCOME_LEADS"
 
         # Check if a campaign with the generated ID already exists
@@ -47,13 +52,18 @@ def ensure_campaign_exists(form_doc):
         frappe.logger().error(f"Error ensuring campaign exists for form_id {form_doc.form_id}: {str(e)}")
         return None
 
-def ensure_ads_exists(form_doc, doc, ads_id=None):
+def ensure_ads_exists(form_doc, doc, ads_id=None, lead_data=None):
     """Ensure an ads exists for the given Meta Lead Form."""
     try:
         current_date = datetime.now().strftime("%d%m%Y")
-        # Generate Ads ID and Name
-        ads_id = ads_id or f"{form_doc.form_name.replace(' ', '_')}_{form_doc.form_id}"
-        ads_name = f"{form_doc.form_name.replace(' ', '_').replace('-', '_')}_{current_date}" if form_doc.form_name else f"Ads_for_{form_doc.form_id}_{current_date}"
+        
+        if lead_data and lead_data.get("ad_id"):
+            ads_id = lead_data.get("ad_id")
+            ads_name = lead_data.get("ad_name") or f"Ads_for_{ads_id}_{current_date}"
+        else:
+            # Generate Ads ID and Name
+            ads_id = ads_id or f"{form_doc.form_name.replace(' ', '_')}_{form_doc.form_id}"
+            ads_name = f"{form_doc.form_name.replace(' ', '_').replace('-', '_')}_{current_date}" if form_doc.form_name else f"Ads_for_{form_doc.form_id}_{current_date}"
 
         # Check if an Ads with this ID exists
         existing_ads = frappe.db.exists("Meta Ads", {"ads_id": ads_id})
@@ -68,7 +78,7 @@ def ensure_ads_exists(form_doc, doc, ads_id=None):
             #     existing_ads_doc.db_set("campaign", form_doc.campaign)
             # elif not existing_ads_doc.campaign and not form_doc.campaign:
             if not existing_ads_doc.campaign:
-                campaign_id = ensure_campaign_exists(form_doc)
+                campaign_id = ensure_campaign_exists(form_doc, lead_data)
                 if not campaign_id:
                     frappe.throw(f"Could not create or find a campaign for form_id: {form_doc.form_id}")
                 # 1a. remove form_doc.camapgin under form M:M campaign deps.
@@ -80,7 +90,7 @@ def ensure_ads_exists(form_doc, doc, ads_id=None):
         # If the campaign is missing, create it first
         # TODO: 1a. remove form_doc.campaign condition, directly make sure that campaign exists and assign it to ads.
         # if not form_doc.campaign:
-        campaign_id = ensure_campaign_exists(form_doc)
+        campaign_id = ensure_campaign_exists(form_doc, lead_data)
         doc.db_set("campaign", campaign_id)
         # if campaign_id:
         #     form_doc.db_set("campaign", campaign_id)
@@ -262,13 +272,13 @@ def process_logged_lead(doc, method):
     #       doc.db_set("error_message", f"No form found in `Meta Lead Form` for form_id: {doc.form_id}, please fetch forms again to get the latest forms.")
     #       return
       if not doc.campaign and doc.ad_id:
-        campaign_id = ensure_campaign_exists(form_config)
+        campaign_id = ensure_campaign_exists(form_config, lead_data)
         if campaign_id:
             doc.db_set("campaign", campaign_id)
 
       # Ensure ads exists and update doc.ads if necessary
       if not doc.ads and doc.ad_id:
-        ads_id = ensure_ads_exists(form_config, doc, doc.ad_id)
+        ads_id = ensure_ads_exists(form_config, doc, doc.ad_id, lead_data)
         if ads_id:
             #   1a. remove form_config.campaign for M:M relationship
             # form_config.db_set("ads", ads_id)
@@ -362,7 +372,7 @@ def fetch_lead_from_meta(leadgen_id, meta_config):
         # Initialize the Facebook API
         FacebookAdsApi.init(app_id, app_secret, user_token)
 
-        lead = Lead(leadgen_id).api_get(fields=["ad_id", "campaign_id", "field_data", "form_id", "created_time", "is_organic", "platform", "post", "vehicle"])
+        lead = Lead(leadgen_id).api_get(fields=["ad_id", "ad_name", "campaign_id", "campaign_name", "field_data", "form_id", "created_time", "is_organic", "platform", "post", "vehicle"])
 
         # convert lead to dictionary/ json
         lead = lead.export_all_data()
