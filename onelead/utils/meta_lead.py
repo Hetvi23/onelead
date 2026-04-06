@@ -21,6 +21,29 @@ def _normalize_platform_label(platform_value):
         return "Instagram"
     return None
 
+
+def extract_ad_id_from_webhook_payload(data, lead_data):
+    """
+    Meta sometimes only nests ad_id under entry[].changes[].value while the top-level
+    value object may omit it. Prefer lead_data.ad_id, then walk the full POST body.
+    """
+    if lead_data:
+        aid = lead_data.get("ad_id")
+        if aid is not None and str(aid).strip() != "":
+            return str(aid).strip()
+    try:
+        for entry in (data or {}).get("entry", []) or []:
+            for change in entry.get("changes", []) or []:
+                if (change or {}).get("field") != "leadgen":
+                    continue
+                val = (change or {}).get("value") or {}
+                aid = val.get("ad_id")
+                if aid is not None and str(aid).strip() != "":
+                    return str(aid).strip()
+    except Exception:
+        pass
+    return None
+
 @frappe.whitelist(allow_guest=True)
 def webhook():
     """ Meta Ads Webhook Entry Point """
@@ -105,7 +128,7 @@ def create_lead_log(data, lead_data, global_conf):
     leadgen_id = lead_data.get("leadgen_id")
     page_id = lead_data.get("page_id")
     form_id = lead_data.get("form_id")
-    ad_id = lead_data.get("ad_id")
+    ad_id = extract_ad_id_from_webhook_payload(data, lead_data)
     created_time = lead_data.get("created_time")
     platform_label = _normalize_platform_label(lead_data.get("platform"))
 

@@ -5,7 +5,11 @@ from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.lead import Lead
 # from .. import formatting_functions
 from ..formatting_functions import FORMATTING_FUNCTIONS
-from ..meta_lead import get_lead_config, _normalize_platform_label
+from ..meta_lead import (
+    extract_ad_id_from_webhook_payload,
+    get_lead_config,
+    _normalize_platform_label,
+)
 # from your_meta_sdk_module import MetaAdsAPI 
 
 
@@ -117,6 +121,75 @@ def ensure_ads_exists(form_doc, doc, ads_id=None, lead_data=None):
     except Exception as e:
         frappe.logger().error(f"Error ensuring Ads exists for form_id {form_doc.form_id}: {str(e)}")
         return None
+
+
+def _raw_payload_as_dict(raw_payload):
+    if raw_payload is None:
+        return {}
+    if isinstance(raw_payload, dict):
+        return raw_payload
+    if isinstance(raw_payload, str):
+        try:
+            return json.loads(raw_payload)
+        except Exception:
+            return {}
+    return {}
+
+
+def get_platform_ad_id_from_log(log_doc):
+    """
+    Meta platform ad id as stored on the webhook (raw JSON), then log.ad_id.
+    Does not resolve Meta Ads Link documents.
+    """
+    raw = _raw_payload_as_dict(getattr(log_doc, "raw_payload", None))
+    pid = extract_ad_id_from_webhook_payload(raw, {})
+    if pid:
+        return pid
+    adid = getattr(log_doc, "ad_id", None)
+    if adid is not None and str(adid).strip() != "":
+        return str(adid).strip()
+    return None
+
+
+@frappe.whitelist()
+def backfill_lead_meta_ad_id_from_logs(limit=None):
+    """
+    Set Lead.meta_ad_id from Meta Webhook Lead Log raw_payload / ad_id for already-processed logs.
+    Skips leads that already have meta_ad_id. System Manager only.
+    """
+    frappe.only_for("System Manager")
+    limit = int(limit) if limit else 5000
+    logs = frappe.get_all(
+        "Meta Webhook Lead Logs",
+        filters={"processing_status": "Processed", "lead_doc_reference": ["!=", ""]},
+        fields=["name", "lead_doc_reference", "lead_doctype"],
+        order_by="modified desc",
+        limit_page_length=limit,
+    )
+    updated = 0
+    for row in logs:
+        if not row.lead_doc_reference:
+            continue
+        if not frappe.db.exists(row.lead_doctype, row.lead_doc_reference):
+            continue
+        meta = frappe.get_meta(row.lead_doctype)
+        if not meta.has_field("meta_ad_id"):
+            continue
+        if (frappe.db.get_value(row.lead_doctype, row.lead_doc_reference, "meta_ad_id") or "").strip():
+            continue
+        log_doc = frappe.get_doc("Meta Webhook Lead Logs", row.name)
+        pid = get_platform_ad_id_from_log(log_doc)
+        if pid:
+            frappe.db.set_value(
+                row.lead_doctype,
+                row.lead_doc_reference,
+                "meta_ad_id",
+                pid,
+                update_modified=False,
+            )
+            updated += 1
+    frappe.db.commit()
+    return {"status": "ok", "updated": updated, "scanned": len(logs)}
 
 
 @frappe.whitelist()
@@ -241,6 +314,11 @@ def process_logged_lead(doc, method):
   """Process a lead after it's logged in Meta Webhook Lead Logs."""
   try:
       meta_config = frappe.get_single("Meta Webhook Config")
+
+      if not getattr(doc, "ad_id", None) and getattr(doc, "raw_payload", None):
+          extracted = extract_ad_id_from_webhook_payload(_raw_payload_as_dict(doc.raw_payload), {})
+          if extracted:
+              doc.db_set("ad_id", extracted)
 
     #   FETCH LEAD DATA FROM META API
       lead_data = None
@@ -412,6 +490,8 @@ def process_default_value(default_value, log_doc, form_doc):
 def create_lead_entry(lead_data, form_doc, log_doc, user="Administrator"):
     """Create a new Lead record in Frappe based on Meta lead data and form configuration."""
     try:
+        log_doc = frappe.get_doc("Meta Webhook Lead Logs", log_doc.name)
+
         field_data = lead_data.get("field_data", [])
         meta_lead_info = {field["name"]: field["values"][0] for field in field_data if "values" in field}
         
@@ -454,6 +534,11 @@ def create_lead_entry(lead_data, form_doc, log_doc, user="Administrator"):
         meta = frappe.get_meta(new_lead.doctype)
         if getattr(log_doc, "form_id", None) and meta.has_field("form_id"):
             new_lead.set("form_id", log_doc.form_id)
+
+        if meta.has_field("meta_ad_id"):
+            platform_ad_id = get_platform_ad_id_from_log(log_doc)
+            if platform_ad_id and not (getattr(new_lead, "meta_ad_id", None) or "").strip():
+                new_lead.meta_ad_id = platform_ad_id
 
         # Ensure Meta source/subsource defaults are applied
         _apply_meta_source_fields(new_lead, log_doc, lead_data)
