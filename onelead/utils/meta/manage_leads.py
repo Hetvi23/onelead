@@ -152,27 +152,36 @@ def get_platform_ad_id_from_log(log_doc):
 
 
 @frappe.whitelist()
-def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100):
+def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100, limit_start=0):
     """
     Set Lead.meta_ad_id from Meta Webhook Lead Log raw_payload / ad_id for already-processed logs.
     Skips leads that already have meta_ad_id. System Manager only.
 
     Logs progress to the default logger (see frappe.log) and prints when run from console.
+
+    Uses stable ``order_by=name asc`` plus ``limit_start`` so you can run multiple batches:
+    first run ``limit_start=0``, then ``limit_start=5000``, etc., until ``batch_rows`` < ``limit``.
+    (Using only ``limit`` without offset always rescans the same newest rows, so older logs never update.)
     """
     frappe.only_for("System Manager")
     limit = int(limit) if limit else 5000
     log_every = max(1, int(log_every) if log_every else 100)
+    limit_start = int(limit_start) if limit_start is not None else 0
 
     log = frappe.logger()
     logs = frappe.get_all(
         "Meta Webhook Lead Logs",
         filters={"processing_status": "Processed", "lead_doc_reference": ["!=", ""]},
         fields=["name", "lead_doc_reference", "lead_doctype"],
-        order_by="modified desc",
+        order_by="name asc",
+        limit_start=limit_start,
         limit_page_length=limit,
     )
     total = len(logs)
-    msg = f"[meta_ad_id backfill] start: {total} log rows to scan (limit={limit})"
+    msg = (
+        f"[meta_ad_id backfill] start: batch rows={total} "
+        f"(limit={limit}, limit_start={limit_start}, order=name asc)"
+    )
     log.info(msg)
     print(msg)
 
@@ -217,10 +226,18 @@ def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100):
             print(msg)
 
     frappe.db.commit()
+    next_start = limit_start + total
     summary = {
         "status": "ok",
         "updated": updated,
         "scanned": total,
+        "limit": limit,
+        "limit_start": limit_start,
+        "next_limit_start": next_start,
+        "more_batches_hint": (
+            f"Run again with limit_start={next_start} (same limit={limit}) "
+            "until batch_rows < limit or you see 0 rows."
+        ),
         "skipped_already_set": skipped_already_set,
         "skipped_no_pid": skipped_no_pid,
         "skipped_no_meta_ad_id_field": skipped_no_field,
