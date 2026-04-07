@@ -154,14 +154,14 @@ def get_platform_ad_id_from_log(log_doc):
 @frappe.whitelist()
 def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100, limit_start=0):
     """
-    Set Lead.meta_ad_id from Meta Webhook Lead Log raw_payload / ad_id for already-processed logs.
+    Set Lead.meta_ad_id from Meta Webhook Lead Log raw_payload / ad_id for all logs
+    that are linked to a lead document.
     Skips leads that already have meta_ad_id. System Manager only.
 
     Logs progress to the default logger (see frappe.log) and prints when run from console.
 
-    Uses stable ``order_by=name asc`` plus ``limit_start`` so you can run multiple batches:
-    first run ``limit_start=0``, then ``limit_start=5000``, etc., until ``batch_rows`` < ``limit``.
-    (Using only ``limit`` without offset always rescans the same newest rows, so older logs never update.)
+    Processes all batches automatically in one call (batch size = ``limit``).
+    ``limit_start`` can be used as the initial offset if you need to resume from the middle.
     """
     frappe.only_for("System Manager")
     limit = int(limit) if limit else 5000
@@ -169,75 +169,86 @@ def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100, limit_start=0)
     limit_start = int(limit_start) if limit_start is not None else 0
 
     log = frappe.logger()
-    logs = frappe.get_all(
-        "Meta Webhook Lead Logs",
-        filters={"processing_status": "Processed", "lead_doc_reference": ["!=", ""]},
-        fields=["name", "lead_doc_reference", "lead_doctype"],
-        order_by="name asc",
-        limit_start=limit_start,
-        limit_page_length=limit,
-    )
-    total = len(logs)
-    msg = (
-        f"[meta_ad_id backfill] start: batch rows={total} "
-        f"(limit={limit}, limit_start={limit_start}, order=name asc)"
-    )
+    msg = f"[meta_ad_id backfill] start: auto-batch mode (limit={limit}, initial_limit_start={limit_start})"
     log.info(msg)
     print(msg)
 
+    scanned = 0
     updated = 0
     skipped_no_field = 0
     skipped_already_set = 0
     skipped_no_pid = 0
+    batch_no = 0
+    current_start = limit_start
+    while True:
+        logs = frappe.get_all(
+            "Meta Webhook Lead Logs",
+            filters={"lead_doc_reference": ["!=", ""]},
+            fields=["name", "lead_doc_reference", "lead_doctype"],
+            order_by="name asc",
+            limit_start=current_start,
+            limit_page_length=limit,
+        )
+        batch_total = len(logs)
+        if batch_total == 0:
+            break
 
-    for idx, row in enumerate(logs, start=1):
-        if not row.lead_doc_reference:
-            continue
-        if not frappe.db.exists(row.lead_doctype, row.lead_doc_reference):
-            continue
-        meta = frappe.get_meta(row.lead_doctype)
-        if not meta.has_field("meta_ad_id"):
-            skipped_no_field += 1
-            continue
-        if (frappe.db.get_value(row.lead_doctype, row.lead_doc_reference, "meta_ad_id") or "").strip():
-            skipped_already_set += 1
-            continue
-        log_doc = frappe.get_doc("Meta Webhook Lead Logs", row.name)
-        pid = get_platform_ad_id_from_log(log_doc)
-        if pid:
-            frappe.db.set_value(
-                row.lead_doctype,
-                row.lead_doc_reference,
-                "meta_ad_id",
-                pid,
-                update_modified=False,
-            )
-            updated += 1
-        else:
-            skipped_no_pid += 1
+        batch_no += 1
+        msg = (
+            f"[meta_ad_id backfill] batch {batch_no}: rows={batch_total} "
+            f"(offset={current_start}, limit={limit})"
+        )
+        log.info(msg)
+        print(msg)
 
-        if idx % log_every == 0 or idx == total:
-            msg = (
-                f"[meta_ad_id backfill] progress: {idx}/{total} "
-                f"| updated={updated} | skipped_already_set={skipped_already_set} "
-                f"| skipped_no_pid={skipped_no_pid} | skipped_no_meta_ad_id_field={skipped_no_field}"
-            )
-            log.info(msg)
-            print(msg)
+        for row in logs:
+            scanned += 1
+            if not row.lead_doc_reference:
+                continue
+            if not frappe.db.exists(row.lead_doctype, row.lead_doc_reference):
+                continue
+            meta = frappe.get_meta(row.lead_doctype)
+            if not meta.has_field("meta_ad_id"):
+                skipped_no_field += 1
+                continue
+            if (frappe.db.get_value(row.lead_doctype, row.lead_doc_reference, "meta_ad_id") or "").strip():
+                skipped_already_set += 1
+                continue
+            log_doc = frappe.get_doc("Meta Webhook Lead Logs", row.name)
+            pid = get_platform_ad_id_from_log(log_doc)
+            if pid:
+                frappe.db.set_value(
+                    row.lead_doctype,
+                    row.lead_doc_reference,
+                    "meta_ad_id",
+                    pid,
+                    update_modified=False,
+                )
+                updated += 1
+            else:
+                skipped_no_pid += 1
+
+            if scanned % log_every == 0:
+                msg = (
+                    f"[meta_ad_id backfill] progress: scanned={scanned} "
+                    f"| updated={updated} | skipped_already_set={skipped_already_set} "
+                    f"| skipped_no_pid={skipped_no_pid} | skipped_no_meta_ad_id_field={skipped_no_field}"
+                )
+                log.info(msg)
+                print(msg)
+
+        current_start += batch_total
 
     frappe.db.commit()
-    next_start = limit_start + total
     summary = {
         "status": "ok",
         "updated": updated,
-        "scanned": total,
+        "scanned": scanned,
+        "batches": batch_no,
         "limit": limit,
         "limit_start": limit_start,
-        "next_limit_start": next_start,
-        "more_batches_hint": (
-            f"Run again with limit_start={next_start} (same limit={limit}) "
-            "until batch_rows < limit or you see 0 rows."
-        ),
+        "next_limit_start": current_start,
+        "more_batches_hint": "Auto-batch mode completed all currently available rows in one run.",
         "skipped_already_set": skipped_already_set,
         "skipped_no_pid": skipped_no_pid,
         "skipped_no_meta_ad_id_field": skipped_no_field,
