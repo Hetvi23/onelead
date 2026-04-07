@@ -152,13 +152,18 @@ def get_platform_ad_id_from_log(log_doc):
 
 
 @frappe.whitelist()
-def backfill_lead_meta_ad_id_from_logs(limit=None):
+def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100):
     """
     Set Lead.meta_ad_id from Meta Webhook Lead Log raw_payload / ad_id for already-processed logs.
     Skips leads that already have meta_ad_id. System Manager only.
+
+    Logs progress to the default logger (see frappe.log) and prints when run from console.
     """
     frappe.only_for("System Manager")
     limit = int(limit) if limit else 5000
+    log_every = max(1, int(log_every) if log_every else 100)
+
+    log = frappe.logger()
     logs = frappe.get_all(
         "Meta Webhook Lead Logs",
         filters={"processing_status": "Processed", "lead_doc_reference": ["!=", ""]},
@@ -166,16 +171,27 @@ def backfill_lead_meta_ad_id_from_logs(limit=None):
         order_by="modified desc",
         limit_page_length=limit,
     )
+    total = len(logs)
+    msg = f"[meta_ad_id backfill] start: {total} log rows to scan (limit={limit})"
+    log.info(msg)
+    print(msg)
+
     updated = 0
-    for row in logs:
+    skipped_no_field = 0
+    skipped_already_set = 0
+    skipped_no_pid = 0
+
+    for idx, row in enumerate(logs, start=1):
         if not row.lead_doc_reference:
             continue
         if not frappe.db.exists(row.lead_doctype, row.lead_doc_reference):
             continue
         meta = frappe.get_meta(row.lead_doctype)
         if not meta.has_field("meta_ad_id"):
+            skipped_no_field += 1
             continue
         if (frappe.db.get_value(row.lead_doctype, row.lead_doc_reference, "meta_ad_id") or "").strip():
+            skipped_already_set += 1
             continue
         log_doc = frappe.get_doc("Meta Webhook Lead Logs", row.name)
         pid = get_platform_ad_id_from_log(log_doc)
@@ -188,8 +204,31 @@ def backfill_lead_meta_ad_id_from_logs(limit=None):
                 update_modified=False,
             )
             updated += 1
+        else:
+            skipped_no_pid += 1
+
+        if idx % log_every == 0 or idx == total:
+            msg = (
+                f"[meta_ad_id backfill] progress: {idx}/{total} "
+                f"| updated={updated} | skipped_already_set={skipped_already_set} "
+                f"| skipped_no_pid={skipped_no_pid} | skipped_no_meta_ad_id_field={skipped_no_field}"
+            )
+            log.info(msg)
+            print(msg)
+
     frappe.db.commit()
-    return {"status": "ok", "updated": updated, "scanned": len(logs)}
+    summary = {
+        "status": "ok",
+        "updated": updated,
+        "scanned": total,
+        "skipped_already_set": skipped_already_set,
+        "skipped_no_pid": skipped_no_pid,
+        "skipped_no_meta_ad_id_field": skipped_no_field,
+    }
+    msg = f"[meta_ad_id backfill] done: {summary}"
+    log.info(msg)
+    print(msg)
+    return summary
 
 
 @frappe.whitelist()
