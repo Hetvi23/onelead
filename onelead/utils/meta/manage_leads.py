@@ -178,6 +178,7 @@ def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100, limit_start=0)
     skipped_no_field = 0
     skipped_already_set = 0
     skipped_no_pid = 0
+    skipped_invalid_link = 0
     batch_no = 0
     current_start = limit_start
     while True:
@@ -203,23 +204,29 @@ def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100, limit_start=0)
 
         for row in logs:
             scanned += 1
-            if not row.lead_doc_reference:
+            lead_doc_reference = (getattr(row, "lead_doc_reference", None) or "").strip()
+            lead_doctype = (getattr(row, "lead_doctype", None) or "").strip()
+            if not lead_doc_reference:
+                skipped_invalid_link += 1
                 continue
-            if not frappe.db.exists(row.lead_doctype, row.lead_doc_reference):
+            if not lead_doctype:
+                skipped_invalid_link += 1
                 continue
-            meta = frappe.get_meta(row.lead_doctype)
+            if not frappe.db.exists(lead_doctype, lead_doc_reference):
+                continue
+            meta = frappe.get_meta(lead_doctype)
             if not meta.has_field("meta_ad_id"):
                 skipped_no_field += 1
                 continue
-            if (frappe.db.get_value(row.lead_doctype, row.lead_doc_reference, "meta_ad_id") or "").strip():
+            if (frappe.db.get_value(lead_doctype, lead_doc_reference, "meta_ad_id") or "").strip():
                 skipped_already_set += 1
                 continue
             log_doc = frappe.get_doc("Meta Webhook Lead Logs", row.name)
             pid = get_platform_ad_id_from_log(log_doc)
             if pid:
                 frappe.db.set_value(
-                    row.lead_doctype,
-                    row.lead_doc_reference,
+                    lead_doctype,
+                    lead_doc_reference,
                     "meta_ad_id",
                     pid,
                     update_modified=False,
@@ -232,7 +239,8 @@ def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100, limit_start=0)
                 msg = (
                     f"[meta_ad_id backfill] progress: scanned={scanned} "
                     f"| updated={updated} | skipped_already_set={skipped_already_set} "
-                    f"| skipped_no_pid={skipped_no_pid} | skipped_no_meta_ad_id_field={skipped_no_field}"
+                    f"| skipped_no_pid={skipped_no_pid} | skipped_no_meta_ad_id_field={skipped_no_field} "
+                    f"| skipped_invalid_link={skipped_invalid_link}"
                 )
                 log.info(msg)
                 print(msg)
@@ -252,6 +260,7 @@ def backfill_lead_meta_ad_id_from_logs(limit=None, log_every=100, limit_start=0)
         "skipped_already_set": skipped_already_set,
         "skipped_no_pid": skipped_no_pid,
         "skipped_no_meta_ad_id_field": skipped_no_field,
+        "skipped_invalid_link": skipped_invalid_link,
     }
     msg = f"[meta_ad_id backfill] done: {summary}"
     log.info(msg)
